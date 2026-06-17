@@ -374,37 +374,25 @@
                   (str "Expected binding vector as first argument of clojure.core/let:" (pr-str bvec)))
         _ (assert (even? (count bvec))
                   (str "Uneven binding vector passed to clojure.core/let: " bvec))
-        {:keys [prop-env ana-env expanded-bindings new-syms reachable binding-types]}
+        {:keys [expanded-bindings reachable]}
         (check-let-bindings
           {:new-syms #{}
            :prop-env (lex/lexical-env opts)
            :ana-env ana-env}
           bvec
           opts)]
-    (cond
-      (not reachable) (assoc expr
-                             :form (-> (list* (first form)
-                                              expanded-bindings
-                                              body-syns)
-                                       (with-meta (merge (meta form)
-                                                         (when (seq binding-types)
-                                                           {::binding-types binding-types}))))
-                             u/expr-type (or expected (r/ret (r/Bottom))))
-      :else (let [cbody (let [body (-> `(do ~@body-syns)
-                                       (ana2/unanalyzed ana-env opts))
-                              opts (var-env/with-lexical-env opts prop-env)]
-                          (let [opts (assoc opts ::vs/current-expr body)]
-                            (-> body
-                                (check-expr expected opts))))
-                  unshadowed-ret (let/erase-objects new-syms (u/expr-type cbody) opts)]
-              (assoc expr
-                     :form (-> (list (first form)
-                                     expanded-bindings
-                                     (emit-form/emit-form cbody opts))
-                               (with-meta (merge (meta form)
-                                                 ;; Per-binding types: {uniquified-name → TCResult}
-                                                 ;; Enables external consumers to extract type info
-                                                 ;; for each let binding from a single check pass.
-                                                 (when (seq binding-types)
-                                                   {::binding-types binding-types}))))
-                     u/expr-type unshadowed-ret)))))
+    ;; Return a CHECKED let* node (delegating to the let* special-form checker)
+    ;; rather than re-emitting a form. This puts u/expr-type on each binding AST
+    ;; node — consumers read per-binding types straight off the :checked-ast,
+    ;; identical to how let*/loop* already expose them. No ::binding-types
+    ;; metadata channel, and no need to propagate/suppress :tag hints (the let*
+    ;; checker handles object erasure and tag prediction itself).
+    (if-not reachable
+      (assoc expr
+             :form (-> (list* (first form) expanded-bindings body-syns)
+                       (with-meta (meta form)))
+             u/expr-type (or expected (r/ret (r/Bottom))))
+      (-> (list* 'let* expanded-bindings body-syns)
+          (with-meta (meta form))
+          (ana2/unanalyzed ana-env opts)
+          (check-expr expected opts)))))
